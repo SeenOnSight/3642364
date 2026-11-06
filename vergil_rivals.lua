@@ -67093,23 +67093,38 @@ local function keyEnum(value)
     return name:match("^MouseButton") and Enum.UserInputType[name] or Enum.KeyCode[name]
 end
 
-function FeatureControl:Set(value,silent)
+function FeatureControl:Set(value,silent,origin)
     if self.Kind=="TextBox" then value=tostring(value or "") end
     local changed=not equalValue(self.Value,value)
+    local previous=self.Value
     self.Value=copyValue(value)
+    local quiet=self.Quiet
     self.Quiet=true
-    if self.Paint then self:Paint(value) end
-    self.Quiet=false
+    local painted,paintError=true,nil
+    if self.Paint then painted,paintError=pcall(self.Paint,self,value,origin) end
+    self.Quiet=quiet
+    if not painted then self.Value=previous; error(paintError,0) end
     if changed then self.ValueChanged:Fire(self.Value) end
     if not silent and changed then
-        if self.Write then self:Write(self.Value) end
+        if self.Write then
+            self.Writing=true
+            local ok,err=pcall(self.Write,self,self.Value)
+            self.Writing=false
+            if not ok then self.PendingPull=nil; self:Set(previous,true); error(err,0) end
+            local pending=self.PendingPull
+            self.PendingPull=nil
+            if pending then self:Pull(pending.Value) end
+        end
         if self.Options.OnChanged then self.Options.OnChanged(self.Value) end
         self.Changed:Fire(self.Value)
     end
     return self
 end
-function FeatureControl:Input(value) if not self.Quiet then self:Set(value,false) end end
-function FeatureControl:Pull(value) if not equalValue(self.Value,value) then self:Set(value,true) end end
+function FeatureControl:Input(value,origin) if not self.Quiet then self:Set(value,false,origin or self.Widget) end end
+function FeatureControl:Pull(value)
+    if self.Writing then self.PendingPull={Value=copyValue(value)}; return end
+    if not equalValue(self.Value,value) then self:Set(value,true) end
+end
 function FeatureControl:OnChanged(fn) self:Connect(self.Changed,fn); return self end
 function FeatureControl:Connect(sig,fn) return self.Bridge.UITrove:Connect(sig,fn) end
 function FeatureControl:SetVisible(value) self.Visible=value; self.Adapter:Refresh(); return self end
@@ -67124,8 +67139,11 @@ function FeatureControl:SetTooltip(_) return self end
 function FeatureControl:ApplyVisibility()
     local visible=self:IsVisible()
     for _,widget in ipairs(self.Widgets) do
-        if widget.SetVisibility then widget:SetVisibility(visible and (widget~=self.PinWidget or self.PinAllowed())) end
+        if not (self.SharedRow and widget==self.Widget) and widget.SetVisibility then
+            widget:SetVisibility(visible and (widget~=self.PinWidget or self.PinAllowed()))
+        end
     end
+    if self.SetDecorationVisible then self:SetDecorationVisible(visible) end
 end
 function FeatureControl:OnClick(fn)
     self:Connect(self.Clicked,function(...)
@@ -67135,6 +67153,7 @@ function FeatureControl:OnClick(fn)
     return self
 end
 function FeatureControl:SetOptions(options)
+    if equalValue(self.ItemOptions,options or {}) then return self end
     self.ItemOptions=options or {}
     if self.RefreshOptions then self:RefreshOptions() end
     return self
@@ -67142,7 +67161,7 @@ end
 function FeatureControl:SetFeatureEnabled(enabled)
     self.FeatureEnabled=enabled
     if self.KeyWidget and self.KeyWidget.Items.KeyButton then
-        self.KeyWidget.Items.KeyButton.Instance.Active=enabled
+        self.KeyWidget.Items.KeyButton.Instance.Active=true
     end
 end
 function FeatureControl:SetShowInList(value,silent)
@@ -67205,6 +67224,7 @@ function WidgetAdapter:Bind(control)
             refreshPin()
         end
     end
+    control.Quiet=false
     control:Set(control.Initial,true)
     control:ApplyVisibility()
     -- Configuration files use the adapter setter, including silent model-to-widget refresh.
@@ -67215,7 +67235,7 @@ function WidgetAdapter:AddToggle(options)
     local c=self:NewControl("Toggle",options)
     c.Widget=self.Section:Toggle({Name=c.Label,Flag=c.Flag,Default=c.Initial==true,Callback=function(value) c:Input(value) end})
     c.Widgets={c.Widget}
-    c.Paint=function(_,value) c.Widget:Set(value==true) end
+    c.Paint=function(_,value,origin) if origin~=c.Widget then c.Widget:Set(value==true) end end
     return self:Bind(c)
 end
 function WidgetAdapter:AddSlider(options)
@@ -67223,7 +67243,7 @@ function WidgetAdapter:AddSlider(options)
     c.Widget=self.Section:Slider({Name=c.Label,Flag=c.Flag,Default=c.Initial or options.Min,
         Min=options.Min,Max=options.Max,Decimals=options.Step or 1,Suffix=options.Suffix or "",Callback=function(value) c:Input(value) end})
     c.Widgets={c.Widget}
-    c.Paint=function(_,value) c.Widget:Set(value) end
+    c.Paint=function(_,value,origin) if origin~=c.Widget then c.Widget:Set(value) end end
     return self:Bind(c)
 end
 function WidgetAdapter:AddTextBox(options)
@@ -67231,7 +67251,7 @@ function WidgetAdapter:AddTextBox(options)
     c.Widget=self.Section:Textbox({Name=c.Label,Flag=c.Flag,Default=c.Initial or "",Placeholder=options.Placeholder,
         Finished=options.FocusLostOnly==true,Callback=function(value) c:Input(value) end})
     c.Widgets={c.Widget}
-    c.Paint=function(_,value) c.Widget:Set(value or "") end
+    c.Paint=function(_,value,origin) if origin~=c.Widget then c.Widget:Set(value or "") end end
     return self:Bind(c)
 end
 function WidgetAdapter:Dropdown(options,multi)
@@ -67251,7 +67271,8 @@ function WidgetAdapter:Dropdown(options,multi)
             else c:Input(value) end
         end})
     c.Widgets={c.Widget}
-    c.Paint=function(_,value)
+    c.Paint=function(_,value,origin)
+        if origin==c.Widget then return end
         if not multi and value==nil then
             c.Widget.Value=nil; c.Widget.Items.Value.Instance.Text="..."; Library.Flags[c.Flag]=nil
         else c.Widget:Set(asArray(value)) end
@@ -67304,16 +67325,17 @@ end
 function WidgetAdapter:AddRangeSlider(options)
     local c=self:NewControl("RangeSlider",options)
     local value=c.Initial or {Min=options.Min,Max=options.Max}
+    local minimum,maximum
     local function changed(key,n)
         if c.Quiet then return end
         local v=copyValue(c.Value or value); v[key]=n
         if key=="Min" then v.Max=math.max(v.Max or n,n) else v.Min=math.min(v.Min or n,n) end
-        c:Input(v)
+        c:Input(v,key=="Min" and minimum or maximum)
     end
-    local minimum=self.Section:Slider({Name=c.Label.." minimum",Flag=c.Flag.."_min",Default=value.Min,Min=options.Min,Max=options.Max,Decimals=options.Step or 1,Callback=function(n) changed("Min",n) end})
-    local maximum=self.Section:Slider({Name=c.Label.." maximum",Flag=c.Flag.."_max",Default=value.Max,Min=options.Min,Max=options.Max,Decimals=options.Step or 1,Callback=function(n) changed("Max",n) end})
+    minimum=self.Section:Slider({Name=c.Label.." minimum",Flag=c.Flag.."_min",Default=value.Min,Min=options.Min,Max=options.Max,Decimals=options.Step or 1,Callback=function(n) changed("Min",n) end})
+    maximum=self.Section:Slider({Name=c.Label.." maximum",Flag=c.Flag.."_max",Default=value.Max,Min=options.Min,Max=options.Max,Decimals=options.Step or 1,Callback=function(n) changed("Max",n) end})
     c.Widget=minimum; c.Widgets={minimum,maximum}
-    c.Paint=function(_,v) minimum:Set(v.Min); maximum:Set(v.Max) end
+    c.Paint=function(_,v,origin) if origin~=minimum then minimum:Set(v.Min) end; if origin~=maximum then maximum:Set(v.Max) end end
     return self:Bind(c)
 end
 function WidgetAdapter:AddOrderedList(options)
@@ -67322,16 +67344,17 @@ function WidgetAdapter:AddOrderedList(options)
     local choices=optionNames(options.Items or c.Initial)
     for i=1,#c.Initial do
         local index=i
-        local widget=self.Section:Dropdown({Name=c.Label.." #"..i,Flag=c.Flag.."_"..i,Items=choices,Default=c.Initial[i],Callback=function(value)
+        local widget
+        widget=self.Section:Dropdown({Name=c.Label.." #"..i,Flag=c.Flag.."_"..i,Items=choices,Default=c.Initial[i],Callback=function(value)
             if c.Quiet or not value then return end
             local order=table.clone(c.Value or c.Initial)
             local old=table.find(order,value); if old then table.remove(order,old) end
-            table.insert(order,index,value); c:Input(order)
+            table.insert(order,index,value); c:Input(order,widget)
         end})
         c.Widgets[#c.Widgets+1]=widget
     end
     c.Widget=c.Widgets[1]
-    c.Paint=function(_,order) for i,widget in ipairs(c.Widgets) do widget:Set(order[i]) end end
+    c.Paint=function(_,order,origin) for i,widget in ipairs(c.Widgets) do if widget~=origin then widget:Set(order[i]) end end end
     return self:Bind(c)
 end
 function WidgetAdapter:AddKeybind(options)
@@ -67345,23 +67368,35 @@ function WidgetAdapter:AddKeybind(options)
     c.Initial=current(); c.Value=c.Initial; c.Quiet=true
     local row=options.Row and options.Row.Widget or self.Section:Label({Name=c.Label})
     c.Widget=row; c.Widgets={row}
+    c.SharedRow=options.Row~=nil
+    local function visualMode(value) return table.find({"Toggle","Hold","Always"},value) and value or "Hold" end
+    c.VisualMode=visualMode(c.Initial.Mode)
     c.KeyWidget=row:Keybind({Name=options.ListLabel or c.Label,Flag=c.Flag,Default=c.Initial.Key,
-        Mode="Hold",ShowInList=false,Callback=function()
+        Mode=c.VisualMode,ShowInList=false,Callback=function()
             if c.Quiet or not c.KeyWidget then return end
-            local value=current(); value.Key=keyEnum(c.KeyWidget.Key); c:Input(value)
+            local value=current(); value.Key=keyEnum(c.KeyWidget.Key)
+            if c.KeyWidget.Mode~=c.VisualMode then
+                if not table.find(options.Modes,c.KeyWidget.Mode) then c:Set(value,true); return end
+                value.Mode=c.KeyWidget.Mode
+            end
+            c:Input(value,c.KeyWidget)
         end})
-    local mode=self.Section:Dropdown({Name=(options.ListLabel or c.Label).." mode",Flag=c.Flag.."_mode",Items=options.Modes,
-        Default=c.Initial.Mode,Callback=function(value) if not c.Quiet then local v=current(); v.Mode=value; c:Input(v) end end})
+    local mode
+    mode=self.Section:Dropdown({Name=(options.ListLabel or c.Label).." mode",Flag=c.Flag.."_mode",Items=options.Modes,
+        Default=c.Initial.Mode,Callback=function(value) if not c.Quiet then local v=current(); v.Mode=value; c:Input(v,mode) end end})
     c.Widgets[#c.Widgets+1]=mode
-    c.Paint=function(_,value)
-        c.KeyWidget:Set({Key=value.Key and tostring(value.Key) or "None",Mode="Hold"}); mode:Set(value.Mode)
+    c.SetDecorationVisible=function(_,visible) c.KeyWidget.Items.KeyButton.Instance.Visible=visible end
+    c.Paint=function(_,value,origin)
+        c.VisualMode=visualMode(value.Mode)
+        if origin~=c.KeyWidget then c.KeyWidget:Set({Key=value.Key and tostring(value.Key) or "None",Mode=c.VisualMode}) end
+        if origin~=mode then mode:Set(value.Mode) end
     end
     c.Write=function(_,value)
         if map.Key then self.Bridge.Store:Set(map.Key,value.Key) end
         if map.Mode then self.Bridge.Store:Set(map.Mode,value.Mode) end
     end
     for _,path in pairs(map) do
-        c:Connect(self.Bridge.Store:GetPropertyChangedSignal(path),function() c:Set(current(),true) end)
+        c:Connect(self.Bridge.Store:GetPropertyChangedSignal(path),function() c:Pull(current()) end)
     end
     c.Quiet=false; c:Set(c.Initial,true); c:ApplyVisibility()
     Library.SetFlags[c.Flag]=function(value)
@@ -67381,13 +67416,16 @@ function WidgetAdapter:AddColor(options)
     end
     c.Initial=read(); c.Value=c.Initial; c.Quiet=true
     local row=options.Row and options.Row.Widget or self.Section:Label({Name=c.Label})
-    local picker=row:Colorpicker({Name=c.Label,Flag=c.Flag,Default=c.Initial.Rgb,Alpha=1-c.Initial.Alpha,Callback=function(color,transparency)
+    local picker
+    picker=row:Colorpicker({Name=c.Label,Flag=c.Flag,Default=c.Initial.Rgb,Alpha=1-c.Initial.Alpha,Callback=function(color,transparency)
         if c.Quiet then return end
         local v=copyValue(c.Value); v.Rgb=color; v.Alpha=1-transparency
         if v.Stops and #v.Stops>0 then v.Stops=table.clone(v.Stops); v.Stops[1]={Time=v.Stops[1].Time,Value=color} end
-        c:Input(v)
+        c:Input(v,picker)
     end})
     c.Widget=row; c.Widgets={row}
+    c.SharedRow=options.Row~=nil
+    c.SetDecorationVisible=function(_,visible) picker:SetVisibility(visible) end
     local selection,time,stopPicker,style
     local selected=1
     if gradient then
@@ -67395,7 +67433,7 @@ function WidgetAdapter:AddColor(options)
             if c.Quiet then return end
             local v=copyValue(c.Value)
             v.Stops=value=="Gradient" and #v.Stops<2 and {{Time=0,Value=v.Rgb},{Time=1,Value=v.Rgb}} or value=="Solid" and {} or v.Stops
-            c:Input(v)
+            c:Input(v,style)
         end})
         selection=self.Section:Dropdown({Name="gradient stop",Flag=c.Flag.."_stop",Items={"1","2"},Default="1",Callback=function(value)
             if c.Quiet then return end
@@ -67405,14 +67443,14 @@ function WidgetAdapter:AddColor(options)
         stopPicker=stopRow:Colorpicker({Flag=c.Flag.."_stopcolor",Default=c.Initial.Rgb,Callback=function(color)
             if c.Quiet or not c.Value.Stops[selected] then return end
             local v=copyValue(c.Value); v.Stops=table.clone(v.Stops)
-            v.Stops[selected]={Time=v.Stops[selected].Time,Value=color}; v.Rgb=v.Stops[1].Value; c:Input(v)
+            v.Stops[selected]={Time=v.Stops[selected].Time,Value=color}; v.Rgb=v.Stops[1].Value; c:Input(v,stopPicker)
         end})
         time=self.Section:Slider({Name="stop position",Flag=c.Flag.."_time",Min=0,Max=1,Decimals=0.01,Default=0,Callback=function(value)
             if c.Quiet or not c.Value.Stops[selected] then return end
             local v=copyValue(c.Value); v.Stops=table.clone(v.Stops)
             if selected==1 or selected==#v.Stops then return end
             v.Stops[selected]={Time=math.clamp(value,v.Stops[selected-1].Time+0.001,v.Stops[selected+1].Time-0.001),Value=v.Stops[selected].Value}
-            c:Input(v)
+            c:Input(v,time)
         end})
         local add=self.Section:Button({Name="add gradient stop",Callback=function()
             local v=copyValue(c.Value); v.Stops=table.clone(v.Stops)
@@ -67429,13 +67467,18 @@ function WidgetAdapter:AddColor(options)
         end})
         for _,widget in ipairs({style,selection,stopRow,time,add,remove}) do c.Widgets[#c.Widgets+1]=widget end
     end
-    c.Paint=function(_,value)
-        picker:Set(value.Rgb,1-value.Alpha)
+    c.Paint=function(_,value,origin)
+        if origin~=picker then picker:Set(value.Rgb,1-value.Alpha) end
         if gradient then
             local names={}; for i=1,#value.Stops do names[#names+1]=tostring(i) end
             selected=math.clamp(selected,1,math.max(1,#names))
-            selection:Refresh(names); selection:Set(tostring(selected)); style:Set(#names>1 and "Gradient" or "Solid")
-            if value.Stops[selected] then stopPicker:Set(value.Stops[selected].Value); time:Set(value.Stops[selected].Time) end
+            if not equalValue(c.StopOptions,names) then c.StopOptions=names; selection:Refresh(names) end
+            selection:Set(tostring(selected))
+            if origin~=style then style:Set(#names>1 and "Gradient" or "Solid") end
+            if value.Stops[selected] then
+                if origin~=stopPicker then stopPicker:Set(value.Stops[selected].Value) end
+                if origin~=time then time:Set(value.Stops[selected].Time) end
+            end
         end
     end
     c.Write=function(_,value)
@@ -67721,6 +67764,28 @@ function FeatureBridge:SyncVisibility()
     if changed then self.Host.VisibilityChanged:Fire(visible) end
 end
 
+function FeatureBridge:SwitchTab(page,turn)
+    if self.Destroyed or not Window.IsOpen then self.PendingTab=nil; return false end
+    if Window.Current==page then self.PendingTab=nil; return true end
+    -- The library drops tab presses while its window fade is active. Settle it first.
+    if Window.Fader.Tween then Window.Fader:Finish() end
+    for _,other in ipairs(Window.Pages) do
+        if other.Fader.Tween then other.Fader:Finish() end
+    end
+    self.PendingTab=page
+    turn(page)
+    local accepted=Window.Current==page
+    if accepted then self.PendingTab=nil end
+    self:SyncVisibility()
+    return accepted
+end
+
+function FeatureBridge:FlushPendingTab()
+    if not Window.IsOpen or self.Destroyed then self.PendingTab=nil; return end
+    local page=self.PendingTab
+    if page then page:Turn() end
+end
+
 function FeatureBridge:InstallProfiles(context)
     -- Use the existing config window for the entire combined feature set.
     Runtime:Replace(Library,"GetConfig",function(original,target,...)
@@ -67754,18 +67819,20 @@ function FeatureBridge:BuildUI(context)
     end
     self:InstallProfiles(context)
     Runtime:Replace(Window,"SetOpen",function(original,target,visible)
+        if not visible then self.PendingTab=nil end
         local result=original(target,visible)
         self:SyncVisibility(); self:SyncCombat()
         return result
     end)
     for _,page in ipairs(Window.Pages) do
         Runtime:Replace(page,"Turn",function(original,target)
-            local result=original(target)
-            self:SyncVisibility()
-            return result
+            return self:SwitchTab(target,original)
+        end)
+        Runtime:Connect(page.Items.Inactive.Instance.Activated,"tab activation "..page.Name,function()
+            page:Turn()
         end)
     end
-    Runtime:Connect(RunService.Heartbeat,"feature menu visibility",function() self:SyncVisibility(); self:SyncCombat() end)
+    Runtime:Connect(RunService.Heartbeat,"feature menu visibility",function() self:FlushPendingTab(); self:SyncVisibility(); self:SyncCombat() end)
     self:SyncVisibility()
     self.Status=self.UIErrors and "loaded with control errors" or "ready"
 end
