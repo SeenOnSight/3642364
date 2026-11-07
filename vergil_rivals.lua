@@ -124,7 +124,7 @@ function Signal:Connect(fn)
     local h = { fn = fn, connected = true }
     table.insert(self._handlers, h)
     local sig = self
-    return {
+    local connection = {
         Connected = true,
         Disconnect = function(c)
             if not h.connected then return end
@@ -134,6 +134,8 @@ function Signal:Connect(fn)
             if i then table.remove(sig._handlers, i) end
         end,
     }
+    h.connection = connection
+    return connection
 end
 function Signal:Once(fn)
     local c
@@ -151,7 +153,9 @@ function Signal:FireSync(...)
         if h.connected then h.fn(...) end
     end
 end
-function Signal:Destroy() table.clear(self._handlers) end
+function Signal:Destroy()
+    for _, h in ipairs(table.clone(self._handlers)) do h.connection:Disconnect() end
+end
 K.Signal = Signal
 
 local Trove = {}
@@ -449,8 +453,14 @@ local v108 = clonefn(K.fn("setfflag")) or function() end
 local v109 = clonefn(K.fn("isexecutorclosure")) or function() return false end
 local v110 = clonefn(K.fn("setrawmetatable")) or setmetatable
 local v111 = clonefn(K.fn("getrawmetatable")) or getmetatable
-local v112 = clonefn(v111(game).__newindex)
-local v113 = clonefn(v111(game).__index)
+local v112, v113
+do
+    local ok, mt = pcall(v111, game)
+    local newindex = ok and type(mt) == "table" and rawget(mt, "__newindex") or nil
+    local index = ok and type(mt) == "table" and rawget(mt, "__index") or nil
+    v112 = type(newindex) == "function" and clonefn(newindex) or function(object, key, value) object[key] = value end
+    v113 = type(index) == "function" and clonefn(index) or function(object, key) return object[key] end
+end
 local v114 = clonefn(game.FindFirstChildOfClass)
 local function n27() return 0 end
 local firetouchinterest = K.fn("firetouchinterest") or function() end
@@ -616,6 +626,7 @@ do
     local Spring = {}
     local function posVel(self, now)
         local p0, v0, p1, d, s = self._p0, self._v0, self._target, self._damper, self._speed
+        if s == 0 then return p0 + v0 * (now - self._t0), v0 end
         local t = s * (now - self._t0)
         local d2 = d * d
         local h, si, co
@@ -1460,7 +1471,22 @@ return v123
 end
 
 index2._FireChanged = function(l,I,W,N)local P=l._pendingUpdateByPathKey[I];if not N and P==nil and l._lastPublishedValueByPathKey[I]==W then return;end;if P==nil then table.insert(l._pendingOrder,I);end;l._pendingUpdateByPathKey[I]={Value=W};end
-index2._Flush = function(l)if l._isFlushing then return;end;l._isFlushing=true;while#l._pendingOrder>0 do local I,W=l._pendingOrder,l._pendingUpdateByPathKey;l._pendingUpdateByPathKey={};l._pendingOrder={};for N,N in I,nil,nil do local I,P=W[N],l._listenerByPathKey[N];if P then P:Fire(I.Value);end;l._lastPublishedValueByPathKey[N]=I.Value;end;end;l._isFlushing=false;end
+index2._Flush = function(arg)
+if arg._isFlushing then return end
+arg._isFlushing = true
+while #arg._pendingOrder > 0 do
+local order, updates = arg._pendingOrder, arg._pendingUpdateByPathKey
+arg._pendingUpdateByPathKey = {}
+arg._pendingOrder = {}
+for _, key in order do
+local update, signal = updates[key], arg._listenerByPathKey[key]
+-- Publish before dispatch so a re-entrant correction queues another update.
+arg._lastPublishedValueByPathKey[key] = update.Value
+if signal then signal:Fire(update.Value) end
+end
+end
+arg._isFlushing = false
+end
 index2._FireForChangedPaths = function(arg, paths)
 local function publish(p)
 local value = v117.NavigateTo(arg.Data, p, true)
@@ -1736,7 +1762,7 @@ local tbl20
 if kind == "Color3" then
 tbl20 = { __type = v86[115], R = v115.R, G = v115.G, B = v115.B }
 elseif kind == "EnumItem" then
-tbl20 = { __type = "EnumItem", EnumType = tostring(v115.EnumType), Name = v115.Name }
+tbl20 = { __type = "EnumItem", EnumType = tostring(v115.EnumType):gsub("^Enum%.", ""), Name = v115.Name }
 elseif kind == "Vector3" then
 tbl20 = { __type = v86[20], X = v115.X, Y = v115.Y, Z = v115.Z }
 elseif kind == v86[127] then
@@ -1781,7 +1807,7 @@ else
 if type_ == "Color3" then
 v115 = Color3.new(v115.R, v115.G, v115.B)
 elseif type_ == "EnumItem" then
-v115 = Enum[v115.EnumType][v115.Name]
+v115 = Enum[v115.EnumType:gsub("^Enum%.", "")][v115.Name]
 elseif type_ == "Vector3" then
 v115 = Vector3.new(v115.X, v115.Y, v115.Z)
 elseif type_ == "CFrame" then
@@ -19756,8 +19782,9 @@ fn38(arg, "")
 return v115.parse(arg)
 end,
 takeDroppedPaths = function()
+local dropped = tbl19
 tbl19 = {}
-return tbl19
+return dropped
 end,
 }
 end
@@ -23876,11 +23903,14 @@ _restore = nil,
 }
 
 setmetatable(tbl18, index2)
-tbl18:_Initialize()
+tbl18._initializeResult = tbl18:_Initialize()
 return tbl18
 end
 
 index2._Initialize = function(arg)
+if type(v110) ~= "function" or v110 == setmetatable then
+return v115.err("DuelerCloneSpoof", "metatable", "setrawmetatable is unavailable")
+end
 local tbl18 = {
 GetHumanoidDescriptionFromUserIdAsync = function(arg2, arg3)
 return v118:GetHumanoidDescriptionFromUserIdAsync(arg._spoofsByUserId[arg3] or arg3)
@@ -23890,12 +23920,26 @@ return v118:CreateHumanoidModelFromDescriptionAsync(arg3, arg4, arg5)
 end,
 }
 
-v110(arg._dummy, { __index = function(arg2, arg3)
+local ok, result = v107(v110, arg._dummy, { __index = function(arg2, arg3)
 return tbl18[arg3]
 end })
+if not ok or result == false then
+return v115.err("DuelerCloneSpoof", "metatable", "setrawmetatable failed: " .. tostring(result))
+end
+local readable, installed = v107(function()
+return arg._dummy.GetHumanoidDescriptionFromUserIdAsync == tbl18.GetHumanoidDescriptionFromUserIdAsync
+and arg._dummy.CreateHumanoidModelFromDescriptionAsync == tbl18.CreateHumanoidModelFromDescriptionAsync
+end)
+if not readable or not installed then
+return v115.err("DuelerCloneSpoof", "metatable", "setrawmetatable did not install the avatar hook")
+end
+return v115.VoidOk
 end
 
 index2.Arm = function(arg)
+if not arg._initializeResult.Ok then
+return arg._initializeResult
+end
 arg._isArmed = true
 if next(arg._spoofsByPlayer) == nil then
 return v115.VoidOk
@@ -23910,6 +23954,9 @@ return v119
 end
 
 index2.SetSpoof = function(arg, arg2, arg3)
+if not arg._initializeResult.Ok then
+return
+end
 if arg._spoofsByPlayer[arg2] == arg3 then
 return
 end
@@ -23930,6 +23977,9 @@ end
 end
 
 index2._Load = function(arg)
+if not arg._initializeResult.Ok then
+return arg._initializeResult
+end
 if not arg._isArmed or arg._restore ~= nil then
 return v115.VoidOk
 end
@@ -28579,10 +28629,10 @@ local kind = arg.Kind
 if kind == "Toggle" or kind == v86[3] then
 arg.State = not arg.State
 else
-if not (kind == "Hold" or kind == "Release") then
+if not (kind == "Hold" or kind == "Release" or kind == "Tap") then
 return
 end
-arg.State = kind == "Hold"
+arg.State = kind ~= "Release"
 end
 
 arg.Callback(arg.State)
@@ -28591,7 +28641,7 @@ end
 index2.InputEnded = function(arg)
 local kind = arg.Kind
 
-if kind == "Hold" or kind == "Release" then
+if kind == "Hold" or kind == "Release" or kind == "Tap" then
 arg.State = kind == "Release"
 arg.Callback(arg.State)
 return
@@ -31520,27 +31570,50 @@ index2.__index = index2
 
 index2.new = function(arg)
 local autoRespawn = v116.new("auto_respawn")
+local tbl18 = { _trove = autoRespawn, _replicateBinding = arg, _enabled = false, _isDestroyed = false }
+local retryTask = nil
+local function stopRetries()
+local thread = retryTask
+retryTask = nil
+if thread ~= nil then autoRespawn:Remove(thread) end
+end
+autoRespawn:Add(stopRetries)
 
 arg:SetHandler(function(arg2)
 if arg2.EnumName ~= "RespawnNowAnimation" or arg2.Args[1] ~= localPlayer then
 return
 end
+if not tbl18._enabled or tbl18._isDestroyed then return end
+stopRetries()
 
+retryTask = autoRespawn:Add(task.defer(function()
 for i = 1, 5 do
+if not tbl18._enabled or tbl18._isDestroyed then break end
 fireServer(respawnNowRemote)
-task.wait(0.1)
+if i < 5 then task.wait(0.1) end
 end
+local thread = coroutine.running()
+if retryTask == thread then retryTask = nil end
+autoRespawn:Remove(thread, true)
+end))
 end)
 
-autoRespawn:Connect(v115:GetPropertyChangedSignal({ "AutoRespawn", v86[44] }), function(arg2)
-arg:SetEnabled(arg2)
-end)
+local function setEnabled(enabled)
+if tbl18._isDestroyed then return end
+tbl18._enabled = enabled == true
+if not tbl18._enabled then stopRetries() end
+arg:SetEnabled(tbl18._enabled)
+end
+autoRespawn:Connect(v115:GetPropertyChangedSignal({ "AutoRespawn", v86[44] }), setEnabled)
 
-arg:SetEnabled(v115.Data.AutoRespawn.Enabled)
-return setmetatable({ _trove = autoRespawn, _replicateBinding = arg }, index2)
+setEnabled(v115.Data.AutoRespawn.Enabled)
+return setmetatable(tbl18, index2)
 end
 
 index2.Destroy = function(arg)
+if arg._isDestroyed then return end
+arg._isDestroyed = true
+arg._enabled = false
 arg._trove:Destroy()
 arg._replicateBinding:Destroy()
 end
@@ -35430,7 +35503,7 @@ index2.__index = index2
 index2.new = function()
 local tbl18 = { _errorReporter = v116.new(), _dummy = Color3.new(), _requestBindings = {} }
 setmetatable(tbl18, index2)
-tbl18:_Initialize()
+tbl18._initializeResult = tbl18:_Initialize()
 return tbl18
 end
 
@@ -35459,15 +35532,29 @@ return new
 end
 
 index2._Initialize = function(arg)
-v110(arg._dummy, { __index = function()
+if type(v110) ~= "function" or v110 == setmetatable then
+return v117.err("RequestDataHook", "metatable", "setrawmetatable is unavailable")
+end
+local invoke = function(arg2, arg3)
+return arg:_ProcessRequest(arg3)
+end
+local ok, result = v107(v110, arg._dummy, { __index = function()
 return {
 Misc = {
-RequestProfile = { InvokeServer = function(arg2, arg3)
-return arg:_ProcessRequest(arg3)
-end },
+RequestProfile = { InvokeServer = invoke },
 },
 }
 end })
+if not ok or result == false then
+return v117.err("RequestDataHook", "metatable", "setrawmetatable failed: " .. tostring(result))
+end
+local readable, installed = v107(function()
+return arg._dummy.Remotes.Misc.RequestProfile.InvokeServer
+end)
+if not readable or installed ~= invoke then
+return v117.err("RequestDataHook", "metatable", "setrawmetatable did not install the request hook")
+end
+return v117.VoidOk
 end
 
 index2._ProcessRequest = function(arg, arg2)
@@ -35482,6 +35569,9 @@ return tbl18.Data
 end
 
 index2._Dispatch = function(arg, arg2)
+if arg._destroyed or not arg._initializeResult.Ok then
+return
+end
 for _, v119 in arg._requestBindings, nil, nil do
 if v119.Enabled then
 local handler = v119.Handler
@@ -35494,6 +35584,12 @@ end
 end
 
 index2._Load = function(arg)
+if arg._destroyed then
+return v117.err("RequestDataHook", "load", "Request hook is destroyed")
+end
+if not arg._initializeResult.Ok then
+return arg._initializeResult
+end
 if arg._restore ~= nil then
 return v117.VoidOk
 end
@@ -35538,7 +35634,12 @@ return v117.VoidOk
 end
 
 index2.Destroy = function(arg)
+if arg._destroyed then
+return
+end
+arg._destroyed = true
 arg:_Revert()
+table.clear(arg._requestBindings)
 arg._errorReporter:Destroy()
 end
 
@@ -37746,36 +37847,52 @@ end
 return clone
 end
 
-local function fn37(arg, arg2)
+local function fn37(arg, arg2, snapshots)
 if arg == arg2 or arg:IsDescendantOf(arg2) then
 return
+end
+
+if snapshots[arg] == nil then
+if arg:IsA("BasePart") then
+snapshots[arg] = { Transparency = arg.Transparency, CastShadow = arg.CastShadow }
+elseif arg:IsA("Decal") or arg:IsA("Texture") then
+snapshots[arg] = { Transparency = arg.Transparency }
+elseif arg:IsA("ParticleEmitter") or arg:IsA("Trail") or arg:IsA("Beam") then
+snapshots[arg] = { Enabled = arg.Enabled }
+else
+return
+end
 end
 
 if arg:IsA("BasePart") then
 arg.Transparency = 1
 arg.CastShadow = false
 elseif arg:IsA("Decal") or arg:IsA("Texture") then
-if true then
 arg.Transparency = 1
-else
-while true do
-end
-end
 elseif arg:IsA("ParticleEmitter") or arg:IsA("Trail") or arg:IsA("Beam") then
 arg.Enabled = v86[153]
 end
 end
 
 local function fn38(arg, arg2, arg3, arg4)
+local snapshots = {}
+arg4:Add(function()
+for instance, properties in next, snapshots do
+for property, value in next, properties do
+pcall(function() instance[property] = value end)
+end
+end
+table.clear(snapshots)
+end)
 arg4:Connect(arg.DescendantAdded, function(arg5)
-if arg5:IsDescendantOf(arg3) then
+if arg5 == arg3 or arg5:IsDescendantOf(arg3) then
 return
 end
-fn37(arg5, arg2)
+fn37(arg5, arg2, snapshots)
 end)
 
 for _, v120 in arg:GetDescendants() do
-fn37(v120, arg2)
+fn37(v120, arg2, snapshots)
 end
 end
 
@@ -37806,6 +37923,7 @@ if v123 == nil then
 arg3:ReportResult(v115.err("Tripmine", "asset_lookup", string.format("viewmodel asset \"%s\" not found in ViewModels", tostring(v120))))
 v123 = parent
 else
+v122:Add(v123)
 fn38(parent, hitbox, v123, v122)
 v123:PivotTo(hitbox.CFrame)
 v123.Parent = parent
@@ -37823,7 +37941,14 @@ end
 end
 
 if v121 ~= nil then
-v116.applyWrapTo(v123, v121)
+local wraps = tbl17.em()
+local originals = wraps.recordOriginalProperties(v123)
+v122:Add(function()
+for instance, snapshot in next, originals do
+pcall(wraps.resetWrap, { [instance] = snapshot })
+end
+end)
+wraps.applyWrap(originals, v121.Name, v121.Inverted)
 end
 end))
 end
@@ -52496,14 +52621,20 @@ tbl18._trove:Connect(v116:GetPropertyChangedSignal({ "PlayerElimination", "Enabl
 tbl18:_SetEnabled(arg5)
 end)
 
+local soundGeneration = 0
+tbl18._trove:Add(function() soundGeneration += 1 end)
 local function fn36(arg5)
+soundGeneration += 1
+local generation = soundGeneration
 tbl18._soundId = nil
 
 if arg5 ~= nil then
 tbl18._trove:AddPromise(tbl18._sfxSoundStorage:GetAsync(arg5):andThen(function(soundId)
+if generation ~= soundGeneration then return end
 tbl18._soundId = soundId
 tbl18._sfxSoundStorage:Preload(soundId)
 end):catch(function()
+if generation ~= soundGeneration then return end
 v118.get():Notify(string.format("failed to load kill sound '%s'", tostring(arg5)))
 end))
 end
@@ -52740,14 +52871,23 @@ tbl18._trove:Connect(v116:GetPropertyChangedSignal({ "PlayerHit", "Sound", "Disa
 tbl18._errorReporter:ReportResult(tbl18._noGameHitsound:SetEnabled(arg4))
 end)
 
+local headGeneration, bodyGeneration = 0, 0
+tbl18._trove:Add(function()
+headGeneration += 1
+bodyGeneration += 1
+end)
 local function fn37(arg4)
+headGeneration += 1
+local generation = headGeneration
 tbl18._headSoundId = nil
 
 if arg4 ~= nil then
 tbl18._trove:AddPromise(tbl18._sfxSoundStorage:GetAsync(arg4):andThen(function(headSoundId)
+if generation ~= headGeneration then return end
 tbl18._headSoundId = headSoundId
 tbl18._sfxSoundStorage:Preload(headSoundId)
 end):catch(function()
+if generation ~= headGeneration then return end
 v119.get():Notify(string.format("failed to load head sound '%s'", tostring(arg4)))
 end))
 end
@@ -52756,13 +52896,17 @@ end
 tbl18._trove:Connect(v116:GetPropertyChangedSignal({ "PlayerHit", "Sound", "HeadName" }), fn37)
 
 local function fn38(arg4)
+bodyGeneration += 1
+local generation = bodyGeneration
 tbl18._bodySoundId = nil
 
 if arg4 ~= nil then
 tbl18._trove:AddPromise(tbl18._sfxSoundStorage:GetAsync(arg4):andThen(function(bodySoundId)
+if generation ~= bodyGeneration then return end
 tbl18._bodySoundId = bodySoundId
 tbl18._sfxSoundStorage:Preload(bodySoundId)
 end):catch(function()
+if generation ~= bodyGeneration then return end
 v119.get():Notify(string.format("failed to load body sound '%s'", tostring(arg4)))
 end))
 end
@@ -53994,11 +54138,14 @@ _restore = nil,
 }
 
 setmetatable(tbl18, index2)
-tbl18:_Initialize()
+tbl18._initializeResult = tbl18:_Initialize()
 return tbl18
 end
 
 index2._Initialize = function(arg)
+if type(v110) ~= "function" or v110 == setmetatable then
+return v117.err("StateHook", "metatable", "setrawmetatable is unavailable")
+end
 local tbl18 = {
 Replication = {
 Fighter = {
@@ -54023,9 +54170,19 @@ end },
 },
 }
 
-v110(arg._dummy, { __index = function()
+local ok, result = v107(v110, arg._dummy, { __index = function()
 return tbl18
 end })
+if not ok or result == false then
+return v117.err("StateHook", "metatable", "setrawmetatable failed: " .. tostring(result))
+end
+local readable, installed = v107(function()
+return arg._dummy.Remotes.Replication.Fighter.UpdateState.FireServer
+end)
+if not readable or installed ~= tbl18.Replication.Fighter.UpdateState.FireServer then
+return v117.err("StateHook", "metatable", "setrawmetatable did not install the state hook")
+end
+return v117.VoidOk
 end
 
 index2.SetForced = function(arg, arg2, arg3)
@@ -54077,6 +54234,9 @@ return v122
 end
 
 index2._Load = function(arg)
+if not arg._initializeResult.Ok then
+return arg._initializeResult
+end
 if arg._restore ~= nil then
 return v117.VoidOk
 end
@@ -58115,7 +58275,7 @@ local activeTrove = arg._activeTrove
 if activeTrove ~= nil then
 arg._activeTrove = nil
 arg._emitters = {}
-activeTrove:Destroy()
+arg._trove:Remove(activeTrove)
 end
 
 if not v117.Data.Weather.Enabled then
@@ -58253,6 +58413,8 @@ return
 end
 
 activeTrove:Add(task.delay(n, function()
+activeTrove:Remove(coroutine.running(), true)
+if arg._activeTrove ~= activeTrove then return end
 local sound = Instance.new("Sound")
 sound.SoundId = soundId
 sound.Volume = volume
